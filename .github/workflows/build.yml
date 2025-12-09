@@ -2,15 +2,41 @@ name: Build and Release
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 env:
   GO_VERSION: '1.23'
 
 jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug trigger
+        run: |
+          echo "=== Debug Trigger Information ==="
+          echo "Git ref: ${{ github.ref }}"
+          echo "Ref name: ${{ github.ref_name }}"
+          echo "Event name: ${{ github.event_name }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Workflow: ${{ github.workflow }}"
+          echo ""
+          echo "To test release creation:"
+          echo "1. Create and push a tag:"
+          echo "   git tag v1.0.0 && git push origin v1.0.0"
+          echo "2. Or use workflow_dispatch from GitHub UI"
+          echo "3. Or push to main/master branch"
+
   build:
+    needs: debug
     strategy:
       fail-fast: false
       matrix:
@@ -76,14 +102,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Debug trigger info
+      - name: Show build info
         run: |
-          echo "=== Build Information ==="
-          echo "Platform: ${{ matrix.display_name }}"
-          echo "OS: ${{ matrix.goos }}, Arch: ${{ matrix.goarch }}"
-          echo "Git ref: ${{ github.ref }}"
-          echo "Tag: ${GITHUB_REF#refs/tags/}"
-          echo "Build type: ${{ matrix.build_type || 'standard' }}"
+          echo "Building for: ${{ matrix.display_name }}"
+          echo "OS: ${{ matrix.goos }}/${{ matrix.goarch }}"
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Will create release: ${{ startsWith(github.ref, 'refs/tags/') }}"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -97,7 +122,6 @@ jobs:
 
       - name: Build executable
         run: |
-          # 确定输出文件名
           if [ "${{ matrix.build_type }}" == "openwrt" ]; then
             OUTPUT_NAME="ech-workers-openwrt"
             echo "Building OpenWrt static binary..."
@@ -116,21 +140,17 @@ jobs:
               ech-workers.go
           fi
           
-          # 验证构建结果
           if [ -f "$OUTPUT_NAME${{ matrix.exe_ext }}" ]; then
-            echo "✓ Build successful: $OUTPUT_NAME${{ matrix.exe_ext }}"
+            echo "✓ Build successful"
             ls -lh "$OUTPUT_NAME${{ matrix.exe_ext }}"
-            if [ "${{ matrix.goos }}" == "linux" ]; then
-              file "$OUTPUT_NAME${{ matrix.exe_ext }}"
-            fi
           else
-            echo "✗ Build failed: $OUTPUT_NAME${{ matrix.exe_ext }} not found"
+            echo "✗ Build failed"
             exit 1
           fi
 
       - name: Prepare release package
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          # 确定包名
           if [ "${{ matrix.build_type }}" == "openwrt" ]; then
             PACKAGE_NAME="ECHWorkers-openwrt-x86_64"
             BINARY_NAME="ech-workers-openwrt"
@@ -141,50 +161,29 @@ jobs:
           
           echo "Creating package: $PACKAGE_NAME${{ matrix.archive_ext }}"
           
-          # 创建临时目录
           mkdir -p release_temp
-          
-          # 复制二进制文件
           cp "$BINARY_NAME${{ matrix.exe_ext }}" "release_temp/$BINARY_NAME${{ matrix.exe_ext }}"
           
-          # 添加执行权限（Linux/macOS）
           if [ "${{ matrix.goos }}" != "windows" ]; then
             chmod +x "release_temp/$BINARY_NAME${{ matrix.exe_ext }}"
           fi
           
-          # 创建README
-          cat > release_temp/README.txt << EOF
-ECH Workers - ${{ matrix.display_name }}
-Version: ${GITHUB_REF#refs/tags/}
-
-Binary: $BINARY_NAME${{ matrix.exe_ext }}
-
-Usage:
-  ./$BINARY_NAME${{ matrix.exe_ext }}
-
-EOF
+          # 创建简单的 README
+          {
+            echo "ECH Workers - ${{ matrix.display_name }}"
+            echo "Tag: ${GITHUB_REF#refs/tags/}"
+            echo ""
+            echo "Usage: ./$BINARY_NAME${{ matrix.exe_ext }}"
+            if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+              echo ""
+              echo "For OpenWrt:"
+              echo "scp $BINARY_NAME root@192.168.1.1:/tmp/"
+              echo "ssh root@192.168.1.1"
+              echo "mv /tmp/$BINARY_NAME /usr/bin/"
+              echo "chmod +x /usr/bin/$BINARY_NAME"
+            fi
+          } > release_temp/README.txt
           
-          # OpenWrt特殊说明
-          if [ "${{ matrix.build_type }}" == "openwrt" ]; then
-            cat >> release_temp/README.txt << EOF
-
-OpenWrt Installation:
-1. Upload to router:
-   scp $BINARY_NAME root@192.168.1.1:/tmp/
-   
-2. SSH into router and install:
-   ssh root@192.168.1.1
-   mv /tmp/$BINARY_NAME /usr/bin/
-   chmod +x /usr/bin/$BINARY_NAME
-   
-3. Run:
-   $BINARY_NAME
-
-Note: This is a statically linked binary for OpenWrt x86_64 with musl libc.
-EOF
-          fi
-          
-          # 创建压缩包
           cd release_temp
           if [ "${{ matrix.archive_format }}" == "zip" ]; then
             zip -r "../$PACKAGE_NAME${{ matrix.archive_ext }}" .
@@ -192,10 +191,11 @@ EOF
             tar -czf "../$PACKAGE_NAME${{ matrix.archive_ext }}" .
           fi
           
-          echo "✓ Package created: $PACKAGE_NAME${{ matrix.archive_ext }}"
+          echo "✓ Package created"
           ls -lh "../$PACKAGE_NAME${{ matrix.archive_ext }}"
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.display_name }}
@@ -207,17 +207,17 @@ EOF
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: success()
+    if: startsWith(github.ref, 'refs/tags/')
     
     permissions:
       contents: write
     
     steps:
-      - name: Debug info
+      - name: Show release info
         run: |
-          echo "=== Release Information ==="
+          echo "=== Creating Release ==="
           echo "Tag: ${{ github.ref_name }}"
-          echo "All jobs completed: ${{ needs.build.result }}"
+          echo "Ref: ${{ github.ref }}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -226,20 +226,18 @@ EOF
           pattern: '*'
           merge-multiple: true
 
-      - name: List downloaded files
+      - name: Prepare release files
         run: |
-          echo "=== Files for release ==="
-          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
-          echo ""
-          echo "Total packages: $(find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | wc -l)"
-          
-          # 复制到一个目录
+          echo "Collecting release packages..."
           mkdir -p release_packages
+          
+          # 查找所有包文件
           find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} release_packages/ \;
           
-          echo ""
-          echo "Release packages:"
+          echo "Packages to release:"
           ls -lh release_packages/
+          echo ""
+          echo "Total: $(ls release_packages/ | wc -l) packages"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -249,28 +247,21 @@ EOF
           body: |
             # ECH Workers ${{ github.ref_name }}
             
-            ## Supported Platforms
+            Multi-platform release including OpenWrt support.
             
-            | Platform | File | Architecture |
-            |----------|------|-------------|
-            | Windows | ECHWorkers-windows-amd64.zip | x64 |
-            | macOS Intel | ECHWorkers-darwin-amd64.zip | x64 |
-            | macOS Apple Silicon | ECHWorkers-darwin-arm64.zip | ARM64 |
-            | Linux | ECHWorkers-linux-amd64.tar.gz | x64 |
-            | Linux ARM | ECHWorkers-linux-arm64.tar.gz | ARM64 |
-            | OpenWrt | ECHWorkers-openwrt-x86_64.tar.gz | x64 (musl) |
+            ## Download Links
             
-            ## Usage
+            - **Windows x64**: ECHWorkers-windows-amd64.zip
+            - **macOS Intel**: ECHWorkers-darwin-amd64.zip
+            - **macOS Apple Silicon**: ECHWorkers-darwin-arm64.zip
+            - **Linux x64**: ECHWorkers-linux-amd64.tar.gz
+            - **Linux ARM64**: ECHWorkers-linux-arm64.tar.gz
+            - **OpenWrt x86_64**: ECHWorkers-openwrt-x86_64.tar.gz
             
-            1. Download the package for your platform
-            2. Extract the archive
-            3. Run the executable
+            ## OpenWrt Installation
             
-            ### OpenWrt Specific
-            
-            For OpenWrt x86_64 devices (OpenWrt 19.07+):
             ```bash
-            # Upload to router
+            # Upload to OpenWrt router
             scp ech-workers-openwrt root@192.168.1.1:/tmp/
             
             # Install
@@ -281,22 +272,15 @@ EOF
             # Run
             ech-workers-openwrt
             ```
-            
-            ## Notes
-            
-            - All binaries are standalone executables
-            - OpenWrt build is statically linked for musl libc
-            - No external dependencies required
           draft: false
           prerelease: false
-          generate_release_notes: true
           files: release_packages/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify release
+      - name: Show success message
         run: |
-          echo "✓ Release created for tag: ${{ github.ref_name }}"
+          echo "✅ Release created successfully!"
           echo ""
-          echo "Download the release from:"
+          echo "Download at:"
           echo "https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
