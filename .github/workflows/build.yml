@@ -13,6 +13,10 @@ on:
       - master
   workflow_dispatch:
 
+env:
+  GO_VERSION: '1.23'
+  PYTHON_VERSION: '3.11'
+
 jobs:
   build:
     strategy:
@@ -24,31 +28,54 @@ jobs:
             exe_ext: .exe
             archive_format: zip
             archive_ext: .zip
+            display_name: Windows x64
           - os: macos-15-intel
             goos: darwin
             goarch: amd64
             exe_ext: ''
             archive_format: zip
             archive_ext: .zip
+            display_name: macOS Intel
           - os: macos-14
             goos: darwin
             goarch: arm64
             exe_ext: ''
             archive_format: zip
             archive_ext: .zip
+            display_name: macOS Apple Silicon
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
             exe_ext: ''
             archive_format: tar.gz
             archive_ext: .tar.gz
-          
+            display_name: Linux x64
           - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             exe_ext: ''
             archive_format: tar.gz
             archive_ext: .tar.gz
+            display_name: Linux ARM64
+          # 新增：OpenWrt x86_64 (musl libc)
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo_enabled: "0"
+            exe_ext: ''
+            archive_format: tar.gz
+            archive_ext: .tar.gz
+            display_name: OpenWrt x86_64
+            build_type: openwrt
+            target: openwrt-x86_64
+            # OpenWrt x86_64 使用 musl libc
+            tags: "osusergo,netgo"
+            ldflags: "-s -w -extldflags -static"
+            # OpenWrt 只需要 Go 可执行文件，不需要 GUI
+            skip_gui: true
+            # 使用特定的文件名区分
+            binary_name: ech-workers-openwrt-x86_64
+            archive_name: ECHWorkers-openwrt-x86_64
 
     runs-on: ${{ matrix.os }}
     
@@ -59,7 +86,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
       - name: Initialize Go module
@@ -67,26 +94,64 @@ jobs:
           go mod init ech-workers || true
           go mod tidy
 
-      - name: Build Go executable
+      - name: Set up cross-compilation toolchain (OpenWrt)
+        if: matrix.build_type == 'openwrt'
         run: |
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o ech-workers${{ matrix.exe_ext }} ech-workers.go
+          # 安装 musl 工具链
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          # 验证 musl-gcc 可用
+          musl-gcc --version || echo "musl-gcc not available, will use CGO_ENABLED=0"
         shell: bash
 
-      - name: Set up Python
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Build Go executable
+        run: |
+          # 确定二进制文件名
+          if [ "${{ matrix.build_type }}" == "openwrt" ] && [ -n "${{ matrix.binary_name }}" ]; then
+            BINARY_NAME="${{ matrix.binary_name }}"
+          else
+            BINARY_NAME="ech-workers"
+          fi
+          
+          # 设置环境变量
+          if [ -n "${{ matrix.cgo_enabled }}" ]; then
+            export CGO_ENABLED=${{ matrix.cgo_enabled }}
+          fi
+          
+          # 构建参数
+          BUILD_ARGS=""
+          if [ -n "${{ matrix.tags }}" ]; then
+            BUILD_ARGS="$BUILD_ARGS -tags ${{ matrix.tags }}"
+          fi
+          
+          if [ -n "${{ matrix.ldflags }}" ]; then
+            BUILD_ARGS="$BUILD_ARGS -ldflags '${{ matrix.ldflags }}'"
+          fi
+          
+          # 执行构建
+          echo "Building for ${{ matrix.goos }}/${{ matrix.goarch }}"
+          echo "Binary name: $BINARY_NAME${{ matrix.exe_ext }}"
+          echo "Build args: $BUILD_ARGS"
+          
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build $BUILD_ARGS \
+            -o $BINARY_NAME${{ matrix.exe_ext }} ech-workers.go
+        shell: bash
+
+      - name: Set up Python (仅非OpenWrt和非跳过GUI的平台)
+        if: startsWith(github.ref, 'refs/tags/') && (matrix.skip_gui != 'true')
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install system dependencies (Linux)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'linux'
+      - name: Install system dependencies (Linux GUI)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'linux' && (matrix.skip_gui != 'true')
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg python3-dev
         shell: bash
 
       - name: Install PyInstaller and dependencies
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && (matrix.skip_gui != 'true')
         run: |
           python -m pip install --upgrade pip
           if [ "${{ matrix.goos }}" == "linux" ]; then
@@ -101,11 +166,9 @@ jobs:
         shell: bash
 
       - name: Build Python executable
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && (matrix.skip_gui != 'true')
         run: |
           # PyInstaller 会自动使用当前系统架构
-          # macos-13 = Intel (x86_64), macos-14 = Apple Silicon (arm64)
-          # ubuntu-latest = x86_64, ubuntu-latest-arm64 = ARM64
           if [ "${{ matrix.goos }}" == "windows" ]; then
             pyinstaller --onefile --windowed --name ECHWorkersGUI gui.py
           elif [ "${{ matrix.goos }}" == "linux" ]; then
@@ -127,91 +190,169 @@ jobs:
         run: |
           mkdir -p release
           
-          # 复制 Go 可执行文件
-          cp ech-workers${{ matrix.exe_ext }} release/
-          
-          # 复制 Python 打包后的可执行文件
-          if [ "${{ matrix.goos }}" == "windows" ]; then
-            if [ -f "dist/ECHWorkersGUI.exe" ]; then
-              cp dist/ECHWorkersGUI.exe release/
-            fi
+          # 确定Go二进制文件名
+          if [ "${{ matrix.build_type }}" == "openwrt" ] && [ -n "${{ matrix.binary_name }}" ]; then
+            GO_BINARY="${{ matrix.binary_name }}${{ matrix.exe_ext }}"
+            FINAL_BINARY="ech-workers-openwrt"
           else
-            if [ -f "dist/ECHWorkersGUI" ]; then
-              cp dist/ECHWorkersGUI release/
-              chmod +x release/ECHWorkersGUI
-            elif [ "${{ matrix.goos }}" == "linux" ]; then
-              echo "GUI executable not built, only Go executable will be included"
+            GO_BINARY="ech-workers${{ matrix.exe_ext }}"
+            FINAL_BINARY="ech-workers"
+          fi
+          
+          # 复制Go可执行文件（重命名为标准名称）
+          cp $GO_BINARY release/$FINAL_BINARY${{ matrix.exe_ext }}
+          
+          # 非OpenWrt平台复制Python GUI
+          if [ "${{ matrix.skip_gui }}" != "true" ]; then
+            if [ "${{ matrix.goos }}" == "windows" ]; then
+              if [ -f "dist/ECHWorkersGUI.exe" ]; then
+                cp dist/ECHWorkersGUI.exe release/
+              fi
+            else
+              if [ -f "dist/ECHWorkersGUI" ]; then
+                cp dist/ECHWorkersGUI release/
+                chmod +x release/ECHWorkersGUI
+              elif [ "${{ matrix.goos }}" == "linux" ]; then
+                echo "GUI executable not built, only Go executable will be included"
+              fi
             fi
           fi
           
-          # 创建 README
+          # 创建README
           {
-            echo "ECH Workers Client"
+            echo "ECH Workers Client - ${{ matrix.display_name }}"
+            echo ""
+            echo "Build Type: ${{ matrix.build_type || 'standard' }}"
+            echo "Architecture: ${{ matrix.goarch }}"
+            echo "Libc: ${{ matrix.build_type == 'openwrt' && 'musl' || 'glibc' }}"
             echo ""
             echo "Files:"
-            echo "- ech-workers(.exe): Go compiled core proxy program"
-            if [ "${{ matrix.goos }}" == "windows" ]; then
-              echo "- ECHWorkersGUI.exe: Python GUI client (standalone executable)"
-            elif [ "${{ matrix.goos }}" == "linux" ]; then
-              if [ -f "release/ECHWorkersGUI" ]; then
-                echo "- ECHWorkersGUI: Python GUI client (standalone executable)"
+            echo "- $FINAL_BINARY${{ matrix.exe_ext }}: Go compiled core proxy program"
+            
+            if [ "${{ matrix.skip_gui }}" != "true" ]; then
+              if [ "${{ matrix.goos }}" == "windows" ]; then
+                if [ -f "release/ECHWorkersGUI.exe" ]; then
+                  echo "- ECHWorkersGUI.exe: Python GUI client (standalone executable)"
+                fi
+              elif [ "${{ matrix.goos }}" == "linux" ]; then
+                if [ -f "release/ECHWorkersGUI" ]; then
+                  echo "- ECHWorkersGUI: Python GUI client (standalone executable)"
+                else
+                  echo "- Note: GUI client not available for this architecture"
+                  echo "  Use $FINAL_BINARY from command line instead"
+                fi
               else
-                echo "- Note: GUI client not available for this architecture"
-                echo "  Use ech-workers from command line instead"
+                echo "- ECHWorkersGUI: Python GUI client (standalone executable)"
               fi
             else
-              echo "- ECHWorkersGUI: Python GUI client (standalone executable)"
+              echo "- Note: GUI client not available for OpenWrt"
+              echo "  Use $FINAL_BINARY from command line only"
             fi
+            
             echo ""
             echo "Usage:"
             if [ "${{ matrix.goos }}" == "windows" ]; then
               echo "1. Double-click ECHWorkersGUI.exe to launch the GUI"
-              echo "2. Or run ech-workers.exe from command line"
+              echo "2. Or run $FINAL_BINARY.exe from command line"
+            elif [ "${{ matrix.build_type }}" == "openwrt" ]; then
+              echo "For OpenWrt:"
+              echo "1. Upload $FINAL_BINARY to your OpenWrt device"
+              echo "2. Make it executable: chmod +x $FINAL_BINARY"
+              echo "3. Run: ./$FINAL_BINARY"
+              echo ""
+              echo "Note: OpenWrt builds are statically linked and don't require"
+              echo "      external libraries. Use on OpenWrt x86_64 only."
             else
               echo "1. Run ./ECHWorkersGUI to launch the GUI"
-              echo "2. Or run ./ech-workers from command line"
+              echo "2. Or run ./$FINAL_BINARY from command line"
             fi
+            
             echo ""
             echo "System Requirements:"
             if [ "${{ matrix.goos }}" == "windows" ]; then
               echo "- Windows: Windows 10+"
             elif [ "${{ matrix.goos }}" == "darwin" ]; then
               echo "- macOS: macOS 10.13+"
+            elif [ "${{ matrix.build_type }}" == "openwrt" ]; then
+              echo "- OpenWrt: x86_64 (64-bit) with musl libc"
+              echo "- Compatible with: OpenWrt 19.07+, 21.02+, 22.03+"
             else
               echo "- Linux: Ubuntu 18.04+ / Debian 10+ / CentOS 7+"
               echo "- Architecture: ${{ matrix.goarch }}"
             fi
-            echo "- No Python installation required (standalone executables)"
+            
+            if [ "${{ matrix.build_type }}" != "openwrt" ]; then
+              echo "- No Python installation required (standalone executables)"
+            fi
+            
+            # OpenWrt 特定说明
+            if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+              echo ""
+              echo "OpenWrt Installation:"
+              echo "1. SCP the binary to your OpenWrt router:"
+              echo "   scp $FINAL_BINARY root@192.168.1.1:/tmp/"
+              echo "2. SSH into your router and move to /usr/bin/:"
+              echo "   mv /tmp/$FINAL_BINARY /usr/bin/"
+              echo "   chmod +x /usr/bin/$FINAL_BINARY"
+              echo "3. Run: $FINAL_BINARY"
+            fi
           } > release/README.txt
+          
+          # 对于OpenWrt，添加一个简单的启动脚本示例
+          if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+            {
+              echo '#!/bin/sh /etc/rc.common'
+              echo '#'
+              echo '# Example init script for OpenWrt'
+              echo '#'
+              echo ''
+              echo 'START=99'
+              echo 'STOP=10'
+              echo ''
+              echo 'start() {'
+              echo '    echo "Starting ECH Workers..."'
+              echo '    /usr/bin/ech-workers-openwrt &'
+              echo '}'
+              echo ''
+              echo 'stop() {'
+              echo '    echo "Stopping ECH Workers..."'
+              echo '    killall ech-workers-openwrt'
+              echo '}'
+            } > release/openwrt-init-example.sh
+            chmod +x release/openwrt-init-example.sh
+          fi
         shell: bash
 
       - name: Create archive (Windows)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'windows'
         run: |
           cd release
-          powershell Compress-Archive -Path * -DestinationPath ../ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.archive_ext }} -Force
+          $archive_name = if ("${{ matrix.archive_name }}") { "${{ matrix.archive_name }}" } else { "ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}" }
+          powershell Compress-Archive -Path * -DestinationPath ../${archive_name}${{ matrix.archive_ext }} -Force
         shell: powershell
 
       - name: Create archive (macOS)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'darwin'
         run: |
           cd release
-          zip -r ../ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.archive_ext }} .
+          archive_name="${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}"
+          zip -r ../${archive_name}${{ matrix.archive_ext }} .
         shell: bash
 
-      - name: Create archive (Linux)
+      - name: Create archive (Linux and OpenWrt)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'linux'
         run: |
           cd release
-          tar -czf ../ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.archive_ext }} .
+          archive_name="${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}"
+          tar -czf ../${archive_name}${{ matrix.archive_ext }} .
         shell: bash
 
       - name: Upload artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.archive_ext }}
+          name: ${{ matrix.display_name }}
+          path: ${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}${{ matrix.archive_ext }}
           retention-days: 30
 
   release:
@@ -224,6 +365,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: List artifacts for debugging
+        run: |
+          find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | sort
+          echo "Total files found:"
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | wc -l
+        shell: bash
 
       - name: Create release
         uses: softprops/action-gh-release@v1
