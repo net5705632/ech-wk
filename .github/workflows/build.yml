@@ -26,14 +26,6 @@ jobs:
           echo "Git ref: ${{ github.ref }}"
           echo "Ref name: ${{ github.ref_name }}"
           echo "Event name: ${{ github.event_name }}"
-          echo "Repository: ${{ github.repository }}"
-          echo "Workflow: ${{ github.workflow }}"
-          echo ""
-          echo "To test release creation:"
-          echo "1. Create and push a tag:"
-          echo "   git tag v1.0.0 && git push origin v1.0.0"
-          echo "2. Or use workflow_dispatch from GitHub UI"
-          echo "3. Or push to main/master branch"
 
   build:
     needs: debug
@@ -49,6 +41,7 @@ jobs:
             archive_format: zip
             archive_ext: .zip
             display_name: Windows x64
+            shell: powershell
             
           # macOS Intel
           - os: macos-15-intel
@@ -58,6 +51,7 @@ jobs:
             archive_format: zip
             archive_ext: .zip
             display_name: macOS Intel
+            shell: bash
             
           # macOS Apple Silicon
           - os: macos-14
@@ -67,6 +61,7 @@ jobs:
             archive_format: zip
             archive_ext: .zip
             display_name: macOS Apple Silicon
+            shell: bash
             
           # Linux x64
           - os: ubuntu-latest
@@ -76,6 +71,7 @@ jobs:
             archive_format: tar.gz
             archive_ext: .tar.gz
             display_name: Linux x64
+            shell: bash
             
           # Linux ARM64
           - os: ubuntu-24.04-arm
@@ -85,6 +81,7 @@ jobs:
             archive_format: tar.gz
             archive_ext: .tar.gz
             display_name: Linux ARM64
+            shell: bash
             
           # OpenWrt x86_64
           - os: ubuntu-latest
@@ -95,6 +92,7 @@ jobs:
             archive_ext: .tar.gz
             display_name: OpenWrt x86_64
             build_type: openwrt
+            shell: bash
 
     runs-on: ${{ matrix.os }}
     
@@ -106,9 +104,7 @@ jobs:
         run: |
           echo "Building for: ${{ matrix.display_name }}"
           echo "OS: ${{ matrix.goos }}/${{ matrix.goarch }}"
-          echo "Trigger: ${{ github.event_name }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Will create release: ${{ startsWith(github.ref, 'refs/tags/') }}"
+        shell: ${{ matrix.shell }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -119,80 +115,158 @@ jobs:
         run: |
           go mod init ech-workers || true
           go mod tidy
+        shell: ${{ matrix.shell }}
 
       - name: Build executable
         run: |
-          if [ "${{ matrix.build_type }}" == "openwrt" ]; then
-            OUTPUT_NAME="ech-workers-openwrt"
-            echo "Building OpenWrt static binary..."
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-              go build \
-              -tags=osusergo,netgo \
-              -ldflags="-s -w -extldflags=-static" \
-              -o "$OUTPUT_NAME${{ matrix.exe_ext }}" \
-              ech-workers.go
-          else
-            OUTPUT_NAME="ech-workers"
-            echo "Building standard binary..."
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-              go build \
-              -o "$OUTPUT_NAME${{ matrix.exe_ext }}" \
-              ech-workers.go
-          fi
-          
-          if [ -f "$OUTPUT_NAME${{ matrix.exe_ext }}" ]; then
-            echo "✓ Build successful"
-            ls -lh "$OUTPUT_NAME${{ matrix.exe_ext }}"
-          else
-            echo "✗ Build failed"
-            exit 1
-          fi
+          if ($IsWindows) {
+            # Windows PowerShell 脚本
+            $buildType = "${{ matrix.build_type }}"
+            
+            if ($buildType -eq "openwrt") {
+              Write-Output "Building OpenWrt static binary..."
+              $env:GOOS = "${{ matrix.goos }}"
+              $env:GOARCH = "${{ matrix.goarch }}"
+              $env:CGO_ENABLED = "0"
+              go build `
+                -tags=osusergo,netgo `
+                -ldflags="-s -w -extldflags=-static" `
+                -o "ech-workers-openwrt.exe" `
+                ech-workers.go
+              $OUTPUT_NAME = "ech-workers-openwrt"
+            } else {
+              Write-Output "Building standard Windows binary..."
+              $env:GOOS = "${{ matrix.goos }}"
+              $env:GOARCH = "${{ matrix.goarch }}"
+              go build `
+                -o "ech-workers.exe" `
+                ech-workers.go
+              $OUTPUT_NAME = "ech-workers"
+            }
+            
+            if (Test-Path "$OUTPUT_NAME.exe") {
+              Write-Output "✓ Build successful: $OUTPUT_NAME.exe"
+              Get-ChildItem "$OUTPUT_NAME.exe" | Format-List *
+            } else {
+              Write-Error "✗ Build failed: $OUTPUT_NAME.exe not found"
+              exit 1
+            }
+          } else {
+            # Linux/macOS Bash 脚本
+            if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+              OUTPUT_NAME="ech-workers-openwrt"
+              echo "Building OpenWrt static binary..."
+              GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+                go build \
+                -tags=osusergo,netgo \
+                -ldflags="-s -w -extldflags=-static" \
+                -o "$OUTPUT_NAME${{ matrix.exe_ext }}" \
+                ech-workers.go
+            else
+              OUTPUT_NAME="ech-workers"
+              echo "Building standard binary..."
+              GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+                go build \
+                -o "$OUTPUT_NAME${{ matrix.exe_ext }}" \
+                ech-workers.go
+            fi
+            
+            if [ -f "$OUTPUT_NAME${{ matrix.exe_ext }}" ]; then
+              echo "✓ Build successful"
+              ls -lh "$OUTPUT_NAME${{ matrix.exe_ext }}"
+              if [ "${{ matrix.goos }}" == "linux" ]; then
+                file "$OUTPUT_NAME${{ matrix.exe_ext }}"
+              fi
+            else
+              echo "✗ Build failed"
+              exit 1
+            fi
+          }
+        shell: ${{ matrix.shell }}
 
       - name: Prepare release package
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          if [ "${{ matrix.build_type }}" == "openwrt" ]; then
-            PACKAGE_NAME="ECHWorkers-openwrt-x86_64"
-            BINARY_NAME="ech-workers-openwrt"
-          else
-            PACKAGE_NAME="ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
-            BINARY_NAME="ech-workers"
-          fi
-          
-          echo "Creating package: $PACKAGE_NAME${{ matrix.archive_ext }}"
-          
-          mkdir -p release_temp
-          cp "$BINARY_NAME${{ matrix.exe_ext }}" "release_temp/$BINARY_NAME${{ matrix.exe_ext }}"
-          
-          if [ "${{ matrix.goos }}" != "windows" ]; then
-            chmod +x "release_temp/$BINARY_NAME${{ matrix.exe_ext }}"
-          fi
-          
-          # 创建简单的 README
-          {
-            echo "ECH Workers - ${{ matrix.display_name }}"
-            echo "Tag: ${GITHUB_REF#refs/tags/}"
-            echo ""
-            echo "Usage: ./$BINARY_NAME${{ matrix.exe_ext }}"
+          if ($IsWindows) {
+            # Windows PowerShell
+            $buildType = "${{ matrix.build_type }}"
+            
+            if ($buildType -eq "openwrt") {
+              $PACKAGE_NAME = "ECHWorkers-openwrt-x86_64"
+              $BINARY_NAME = "ech-workers-openwrt"
+            } else {
+              $PACKAGE_NAME = "ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
+              $BINARY_NAME = "ech-workers"
+            }
+            
+            Write-Output "Creating Windows package: ${PACKAGE_NAME}${{ matrix.archive_ext }}"
+            
+            # 创建临时目录
+            New-Item -ItemType Directory -Path "release_temp" -Force | Out-Null
+            
+            # 复制文件
+            Copy-Item "${BINARY_NAME}.exe" "release_temp\${BINARY_NAME}.exe"
+            
+            # 创建 README
+            $readmeContent = @"
+ECH Workers - ${{ matrix.display_name }}
+Tag: ${{ github.ref_name }}
+
+Usage: ${BINARY_NAME}.exe
+"@
+            $readmeContent | Out-File -FilePath "release_temp\README.txt" -Encoding UTF8
+            
+            # 创建 ZIP 包
+            Compress-Archive -Path "release_temp\*" -DestinationPath "${PACKAGE_NAME}${{ matrix.archive_ext }}" -Force
+            
+            Write-Output "✓ Package created"
+            Get-ChildItem "${PACKAGE_NAME}${{ matrix.archive_ext }}" | Format-List *
+          } else {
+            # Linux/macOS
             if [ "${{ matrix.build_type }}" == "openwrt" ]; then
-              echo ""
-              echo "For OpenWrt:"
-              echo "scp $BINARY_NAME root@192.168.1.1:/tmp/"
-              echo "ssh root@192.168.1.1"
-              echo "mv /tmp/$BINARY_NAME /usr/bin/"
-              echo "chmod +x /usr/bin/$BINARY_NAME"
+              PACKAGE_NAME="ECHWorkers-openwrt-x86_64"
+              BINARY_NAME="ech-workers-openwrt"
+            else
+              PACKAGE_NAME="ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
+              BINARY_NAME="ech-workers"
             fi
-          } > release_temp/README.txt
-          
-          cd release_temp
-          if [ "${{ matrix.archive_format }}" == "zip" ]; then
-            zip -r "../$PACKAGE_NAME${{ matrix.archive_ext }}" .
-          else
-            tar -czf "../$PACKAGE_NAME${{ matrix.archive_ext }}" .
-          fi
-          
-          echo "✓ Package created"
-          ls -lh "../$PACKAGE_NAME${{ matrix.archive_ext }}"
+            
+            echo "Creating package: $PACKAGE_NAME${{ matrix.archive_ext }}"
+            
+            mkdir -p release_temp
+            cp "$BINARY_NAME${{ matrix.exe_ext }}" "release_temp/$BINARY_NAME${{ matrix.exe_ext }}"
+            
+            if [ "${{ matrix.goos }}" != "windows" ]; then
+              chmod +x "release_temp/$BINARY_NAME${{ matrix.exe_ext }}"
+            fi
+            
+            # 创建 README
+            {
+              echo "ECH Workers - ${{ matrix.display_name }}"
+              echo "Tag: ${{ github.ref_name }}"
+              echo ""
+              echo "Usage: ./$BINARY_NAME${{ matrix.exe_ext }}"
+              if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+                echo ""
+                echo "For OpenWrt:"
+                echo "scp $BINARY_NAME root@192.168.1.1:/tmp/"
+                echo "ssh root@192.168.1.1"
+                echo "mv /tmp/$BINARY_NAME /usr/bin/"
+                echo "chmod +x /usr/bin/$BINARY_NAME"
+              fi
+            } > release_temp/README.txt
+            
+            cd release_temp
+            if [ "${{ matrix.archive_format }}" == "zip" ]; then
+              zip -r "../$PACKAGE_NAME${{ matrix.archive_ext }}" .
+            else
+              tar -czf "../$PACKAGE_NAME${{ matrix.archive_ext }}" .
+            fi
+            
+            echo "✓ Package created"
+            ls -lh "../$PACKAGE_NAME${{ matrix.archive_ext }}"
+          }
+        shell: ${{ matrix.shell }}
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/')
@@ -217,7 +291,7 @@ jobs:
         run: |
           echo "=== Creating Release ==="
           echo "Tag: ${{ github.ref_name }}"
-          echo "Ref: ${{ github.ref }}"
+        shell: bash
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -231,13 +305,11 @@ jobs:
           echo "Collecting release packages..."
           mkdir -p release_packages
           
-          # 查找所有包文件
           find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} release_packages/ \;
           
           echo "Packages to release:"
           ls -lh release_packages/
-          echo ""
-          echo "Total: $(ls release_packages/ | wc -l) packages"
+        shell: bash
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -247,21 +319,21 @@ jobs:
           body: |
             # ECH Workers ${{ github.ref_name }}
             
-            Multi-platform release including OpenWrt support.
+            ## Downloads
             
-            ## Download Links
-            
-            - **Windows x64**: ECHWorkers-windows-amd64.zip
-            - **macOS Intel**: ECHWorkers-darwin-amd64.zip
-            - **macOS Apple Silicon**: ECHWorkers-darwin-arm64.zip
-            - **Linux x64**: ECHWorkers-linux-amd64.tar.gz
-            - **Linux ARM64**: ECHWorkers-linux-arm64.tar.gz
-            - **OpenWrt x86_64**: ECHWorkers-openwrt-x86_64.tar.gz
+            | Platform | File |
+            |----------|------|
+            | Windows x64 | [ECHWorkers-windows-amd64.zip](ECHWorkers-windows-amd64.zip) |
+            | macOS Intel | [ECHWorkers-darwin-amd64.zip](ECHWorkers-darwin-amd64.zip) |
+            | macOS Apple Silicon | [ECHWorkers-darwin-arm64.zip](ECHWorkers-darwin-arm64.zip) |
+            | Linux x64 | [ECHWorkers-linux-amd64.tar.gz](ECHWorkers-linux-amd64.tar.gz) |
+            | Linux ARM64 | [ECHWorkers-linux-arm64.tar.gz](ECHWorkers-linux-arm64.tar.gz) |
+            | OpenWrt x86_64 | [ECHWorkers-openwrt-x86_64.tar.gz](ECHWorkers-openwrt-x86_64.tar.gz) |
             
             ## OpenWrt Installation
             
             ```bash
-            # Upload to OpenWrt router
+            # Upload
             scp ech-workers-openwrt root@192.168.1.1:/tmp/
             
             # Install
@@ -277,10 +349,3 @@ jobs:
           files: release_packages/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Show success message
-        run: |
-          echo "✅ Release created successfully!"
-          echo ""
-          echo "Download at:"
-          echo "https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
