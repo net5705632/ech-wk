@@ -82,6 +82,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取所有历史记录，用于标签检测
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -121,6 +123,8 @@ jobs:
           echo "Building for ${{ matrix.goos }}/${{ matrix.goarch }}"
           echo "Binary name: $BINARY_NAME${{ matrix.exe_ext }}"
           echo "Build type: ${{ matrix.build_type || 'standard' }}"
+          echo "Git ref: ${{ github.ref }}"
+          echo "Is tag: ${{ startsWith(github.ref, 'refs/tags/') }}"
           
           # 执行构建 - 修复引号传递问题
           if [ "${{ matrix.build_type }}" == "openwrt" ]; then
@@ -201,6 +205,13 @@ jobs:
           fi
         shell: bash
 
+      - name: Check if creating artifacts (debug)
+        run: |
+          echo "Git ref: ${{ github.ref }}"
+          echo "Is tag: ${{ startsWith(github.ref, 'refs/tags/') }}"
+          echo "Will create artifacts: ${{ startsWith(github.ref, 'refs/tags/') }}"
+        shell: bash
+
       - name: Prepare release files
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -215,9 +226,14 @@ jobs:
             FINAL_BINARY="ech-workers"
           fi
           
+          echo "Preparing release files..."
+          echo "Go binary: $GO_BINARY"
+          echo "Final binary name: $FINAL_BINARY"
+          
           # 复制Go可执行文件（重命名为标准名称）
           if [ -f "$GO_BINARY" ]; then
             cp "$GO_BINARY" "release/$FINAL_BINARY${{ matrix.exe_ext }}"
+            echo "Copied Go binary to release/"
           else
             echo "Error: Go binary $GO_BINARY not found!"
             exit 1
@@ -228,11 +244,13 @@ jobs:
             if [ "${{ matrix.goos }}" == "windows" ]; then
               if [ -f "dist/ECHWorkersGUI.exe" ]; then
                 cp dist/ECHWorkersGUI.exe release/
+                echo "Copied Windows GUI to release/"
               fi
             else
               if [ -f "dist/ECHWorkersGUI" ]; then
                 cp dist/ECHWorkersGUI release/
                 chmod +x release/ECHWorkersGUI
+                echo "Copied GUI to release/"
               elif [ "${{ matrix.goos }}" == "linux" ]; then
                 echo "GUI executable not built, only Go executable will be included"
               fi
@@ -342,30 +360,54 @@ jobs:
             } > release/openwrt-init-example.sh
             chmod +x release/openwrt-init-example.sh
           fi
+          
+          echo "Release directory contents:"
+          ls -la release/
         shell: bash
 
       - name: Create archive (Windows)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'windows'
         run: |
           cd release
-          $archive_name = if ("${{ matrix.archive_name }}") { "${{ matrix.archive_name }}" } else { "ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}" }
+          if [ -n "${{ matrix.archive_name }}" ]; then
+            archive_name="${{ matrix.archive_name }}"
+          else
+            archive_name="ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
+          echo "Creating Windows archive: ${archive_name}${{ matrix.archive_ext }}"
           powershell Compress-Archive -Path * -DestinationPath ../${archive_name}${{ matrix.archive_ext }} -Force
+          echo "Archive created: ../${archive_name}${{ matrix.archive_ext }}"
+          ls -lh ../${archive_name}${{ matrix.archive_ext }}
         shell: powershell
 
       - name: Create archive (macOS)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'darwin'
         run: |
           cd release
-          archive_name="${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}"
+          if [ -n "${{ matrix.archive_name }}" ]; then
+            archive_name="${{ matrix.archive_name }}"
+          else
+            archive_name="ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
+          echo "Creating macOS archive: ${archive_name}${{ matrix.archive_ext }}"
           zip -r ../${archive_name}${{ matrix.archive_ext }} .
+          echo "Archive created: ../${archive_name}${{ matrix.archive_ext }}"
+          ls -lh ../${archive_name}${{ matrix.archive_ext }}
         shell: bash
 
       - name: Create archive (Linux and OpenWrt)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'linux'
         run: |
           cd release
-          archive_name="${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}"
+          if [ -n "${{ matrix.archive_name }}" ]; then
+            archive_name="${{ matrix.archive_name }}"
+          else
+            archive_name="ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
+          echo "Creating Linux/OpenWrt archive: ${archive_name}${{ matrix.archive_ext }}"
           tar -czf ../${archive_name}${{ matrix.archive_ext }} .
+          echo "Archive created: ../${archive_name}${{ matrix.archive_ext }}"
+          ls -lh ../${archive_name}${{ matrix.archive_ext }}
         shell: bash
 
       - name: Upload artifacts
@@ -373,7 +415,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.display_name }}
-          path: ${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}${{ matrix.archive_ext }}
+          path: |
+            ${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}${{ matrix.archive_ext }}
           retention-days: 30
 
   release:
@@ -381,26 +424,58 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     
+    permissions:
+      contents: write  # 添加必要的权限
+    
     steps:
+      - name: Check if creating release (debug)
+        run: |
+          echo "Git ref: ${{ github.ref }}"
+          echo "Is tag: ${{ startsWith(github.ref, 'refs/tags/') }}"
+          echo "Will create release: ${{ startsWith(github.ref, 'refs/tags/') }}"
+          echo "Tag name: ${GITHUB_REF#refs/tags/}"
+        shell: bash
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: '*'
+          merge-multiple: false
 
       - name: List artifacts for debugging
         run: |
-          find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | sort
-          echo "Total files found:"
+          echo "Artifacts directory structure:"
+          find artifacts -type f | sort
+          echo ""
+          echo "Compressed files found:"
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
+          echo ""
+          echo "Total compressed files found:"
           find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | wc -l
+        shell: bash
+
+      - name: Prepare release files
+        run: |
+          # 查找所有压缩文件
+          echo "Preparing release files..."
+          mkdir -p release_files
+          
+          # 使用 find 命令查找所有 zip 和 tar.gz 文件
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} release_files/ \;
+          
+          echo "Files to be released:"
+          ls -lh release_files/
+          echo ""
+          echo "Total files: $(ls release_files/ | wc -l)"
         shell: bash
 
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            artifacts/**/*.zip
-            artifacts/**/*.tar.gz
+          files: release_files/*
           draft: false
           prerelease: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
