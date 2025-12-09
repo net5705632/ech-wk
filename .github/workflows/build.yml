@@ -89,17 +89,15 @@ jobs:
 
       - name: Build Go executable
         run: |
-          # 确定二进制文件名
-          if [ "${{ matrix.build_type }}" == "openwrt" ] && [ -n "${{ matrix.binary_name }}" ]; then
-            BINARY_NAME="${{ matrix.binary_name }}"
+          # 确定最终二进制文件名（发布时使用的名字）
+          if [ "${{ matrix.build_type }}" == "openwrt" ]; then
             FINAL_BINARY="ech-workers-openwrt"
           else
-            BINARY_NAME="ech-workers"
             FINAL_BINARY="ech-workers"
           fi
           
           echo "Building for ${{ matrix.goos }}/${{ matrix.goarch }}"
-          echo "Binary name: $BINARY_NAME${{ matrix.exe_ext }}"
+          echo "Final binary name: $FINAL_BINARY${{ matrix.exe_ext }}"
           echo "Build type: ${{ matrix.build_type || 'standard' }}"
           
           # 执行构建
@@ -110,19 +108,16 @@ jobs:
               go build \
               -tags=osusergo,netgo \
               -ldflags="-s -w -extldflags=-static" \
-              -o "$BINARY_NAME${{ matrix.exe_ext }}" \
+              -o "$FINAL_BINARY${{ matrix.exe_ext }}" \
               ech-workers.go
           else
             # 标准构建
             echo "Building standard binary..."
             GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
               go build \
-              -o "$BINARY_NAME${{ matrix.exe_ext }}" \
+              -o "$FINAL_BINARY${{ matrix.exe_ext }}" \
               ech-workers.go
           fi
-          
-          # 重命名文件
-          cp "$BINARY_NAME${{ matrix.exe_ext }}" "$FINAL_BINARY${{ matrix.exe_ext }}"
           
           # 检查文件是否生成
           if [ -f "$FINAL_BINARY${{ matrix.exe_ext }}" ]; then
@@ -143,27 +138,53 @@ jobs:
           # 准备发布目录
           mkdir -p release
           
-          # 复制二进制文件
+          # 确定二进制文件名
           if [ "${{ matrix.build_type }}" == "openwrt" ]; then
-            cp ech-workers-openwrt${{ matrix.exe_ext }} release/
+            BINARY_NAME="ech-workers-openwrt"
           else
-            cp ech-workers${{ matrix.exe_ext }} release/
+            BINARY_NAME="ech-workers"
           fi
           
+          # 复制二进制文件
+          cp "$BINARY_NAME${{ matrix.exe_ext }}" release/
+          
           # 创建README
-          echo "ECH Workers - ${{ matrix.display_name }}" > release/README.txt
-          echo "Built from tag: ${GITHUB_REF#refs/tags/}" >> release/README.txt
-          echo "Architecture: ${{ matrix.goarch }}" >> release/README.txt
-          echo "" >> release/README.txt
-          echo "Usage: ./ech-workers${{ matrix.exe_ext }}" >> release/README.txt
+          {
+            echo "ECH Workers - ${{ matrix.display_name }}"
+            echo ""
+            echo "Built from tag: ${GITHUB_REF#refs/tags/}"
+            echo "Build Type: ${{ matrix.build_type || 'standard' }}"
+            echo "Architecture: ${{ matrix.goarch }}"
+            echo ""
+            echo "Usage:"
+            echo "  ./$BINARY_NAME${{ matrix.exe_ext }}"
+            echo ""
+            if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+              echo "For OpenWrt installation:"
+              echo "1. Upload to router: scp $BINARY_NAME root@192.168.1.1:/tmp/"
+              echo "2. Move to /usr/bin: mv /tmp/$BINARY_NAME /usr/bin/"
+              echo "3. Make executable: chmod +x /usr/bin/$BINARY_NAME"
+            fi
+          } > release/README.txt
           
           # 创建压缩包
           cd release
-          if [ "${{ matrix.archive_format }}" == "zip" ]; then
-            zip -r ../${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}${{ matrix.archive_ext }} .
+          if [ -n "${{ matrix.archive_name }}" ]; then
+            ARCHIVE_NAME="${{ matrix.archive_name }}"
           else
-            tar -czf ../${{ matrix.archive_name || 'ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}' }}${{ matrix.archive_ext }} .
+            ARCHIVE_NAME="ECHWorkers-${{ matrix.goos }}-${{ matrix.goarch }}"
           fi
+          
+          if [ "${{ matrix.archive_format }}" == "zip" ]; then
+            echo "Creating ZIP archive: $ARCHIVE_NAME${{ matrix.archive_ext }}"
+            zip -r "../$ARCHIVE_NAME${{ matrix.archive_ext }}" .
+          else
+            echo "Creating tar.gz archive: $ARCHIVE_NAME${{ matrix.archive_ext }}"
+            tar -czf "../$ARCHIVE_NAME${{ matrix.archive_ext }}" .
+          fi
+          
+          echo "Archive created: ../$ARCHIVE_NAME${{ matrix.archive_ext }}"
+          ls -lh "../$ARCHIVE_NAME${{ matrix.archive_ext }}"
         shell: bash
 
       - name: Upload artifacts
@@ -185,9 +206,11 @@ jobs:
     steps:
       - name: Debug - Check tag
         run: |
+          echo "=== Debug Information ==="
           echo "Git ref: ${{ github.ref }}"
           echo "Tag name: ${GITHUB_REF#refs/tags/}"
           echo "Is tag build: ${{ startsWith(github.ref, 'refs/tags/') }}"
+          echo "Event name: ${{ github.event_name }}"
         shell: bash
       
       - name: Download artifacts
@@ -199,32 +222,73 @@ jobs:
 
       - name: List downloaded artifacts
         run: |
-          echo "Artifacts found:"
-          find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | sort
+          echo "=== Artifacts Found ==="
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
           echo ""
-          echo "Total: $(find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | wc -l) files"
+          echo "Total files: $(find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | wc -l)"
+          
+          # 检查文件大小
+          echo ""
+          echo "File sizes:"
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec ls -lh {} \;
+        shell: bash
+
+      - name: Prepare release directory
+        run: |
+          # 复制所有压缩文件到一个目录
+          mkdir -p release_files
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} release_files/ \;
+          
+          echo "Files in release_files/:"
+          ls -lh release_files/
+          echo ""
+          echo "Total release files: $(ls release_files/ | wc -l)"
         shell: bash
 
       - name: Create GitHub Release
+        # 只有在有文件时才创建 release
+        if: "!failure()"
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |
-            ECH Workers ${{ github.ref_name }}
+            # ECH Workers ${{ github.ref_name }}
             
-            Built for multiple platforms:
-            - Windows x64
-            - macOS Intel and Apple Silicon
-            - Linux x64 and ARM64
-            - OpenWrt x86_64
+            ## Platform Builds
             
-            See individual packages for platform-specific instructions.
+            This release contains builds for multiple platforms:
+            
+            - **Windows x64** (.zip)
+            - **macOS Intel** (.zip) 
+            - **macOS Apple Silicon** (.zip)
+            - **Linux x64** (.tar.gz)
+            - **Linux ARM64** (.tar.gz)
+            - **OpenWrt x86_64** (.tar.gz)
+            
+            ## Usage
+            
+            1. Download the appropriate package for your platform
+            2. Extract the archive
+            3. Run the executable
+            
+            ### OpenWrt Instructions
+            
+            For OpenWrt x86_64 devices:
+            ```
+            scp ech-workers-openwrt root@192.168.1.1:/tmp/
+            ssh root@192.168.1.1
+            mv /tmp/ech-workers-openwrt /usr/bin/
+            chmod +x /usr/bin/ech-workers-openwrt
+            ```
+            
+            ## Notes
+            
+            - All binaries are standalone and don't require external dependencies
+            - OpenWrt build is statically linked for musl libc
           draft: false
           prerelease: false
           generate_release_notes: false
-          files: |
-            artifacts/*.zip
-            artifacts/*.tar.gz
+          files: release_files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
