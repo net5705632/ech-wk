@@ -118,23 +118,39 @@ jobs:
             export CGO_ENABLED=${{ matrix.cgo_enabled }}
           fi
           
-          # 构建参数
-          BUILD_ARGS=""
-          if [ -n "${{ matrix.tags }}" ]; then
-            BUILD_ARGS="$BUILD_ARGS -tags ${{ matrix.tags }}"
-          fi
-          
-          if [ -n "${{ matrix.ldflags }}" ]; then
-            BUILD_ARGS="$BUILD_ARGS -ldflags '${{ matrix.ldflags }}'"
-          fi
-          
-          # 执行构建
           echo "Building for ${{ matrix.goos }}/${{ matrix.goarch }}"
           echo "Binary name: $BINARY_NAME${{ matrix.exe_ext }}"
-          echo "Build args: $BUILD_ARGS"
+          echo "Build type: ${{ matrix.build_type || 'standard' }}"
           
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build $BUILD_ARGS \
-            -o $BINARY_NAME${{ matrix.exe_ext }} ech-workers.go
+          # 执行构建 - 修复引号传递问题
+          if [ "${{ matrix.build_type }}" == "openwrt" ]; then
+            # OpenWrt 静态构建
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+              go build \
+              -tags=osusergo,netgo \
+              -ldflags="-s -w -extldflags=-static" \
+              -o "$BINARY_NAME${{ matrix.exe_ext }}" \
+              ech-workers.go
+          else
+            # 标准构建
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+              go build \
+              -o "$BINARY_NAME${{ matrix.exe_ext }}" \
+              ech-workers.go
+          fi
+          
+          # 检查文件是否生成
+          if [ -f "$BINARY_NAME${{ matrix.exe_ext }}" ]; then
+            echo "Build successful: $BINARY_NAME${{ matrix.exe_ext }}"
+            ls -lh "$BINARY_NAME${{ matrix.exe_ext }}"
+            # 如果是 Linux/OpenWrt，检查文件类型
+            if [ "${{ matrix.goos }}" == "linux" ]; then
+              file "$BINARY_NAME${{ matrix.exe_ext }}"
+            fi
+          else
+            echo "Error: Build failed - output file not found"
+            exit 1
+          fi
         shell: bash
 
       - name: Set up Python (仅非OpenWrt和非跳过GUI的平台)
@@ -200,7 +216,12 @@ jobs:
           fi
           
           # 复制Go可执行文件（重命名为标准名称）
-          cp $GO_BINARY release/$FINAL_BINARY${{ matrix.exe_ext }}
+          if [ -f "$GO_BINARY" ]; then
+            cp "$GO_BINARY" "release/$FINAL_BINARY${{ matrix.exe_ext }}"
+          else
+            echo "Error: Go binary $GO_BINARY not found!"
+            exit 1
+          fi
           
           # 非OpenWrt平台复制Python GUI
           if [ "${{ matrix.skip_gui }}" != "true" ]; then
